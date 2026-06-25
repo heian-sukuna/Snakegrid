@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# ─── snakegrid ───────────────────────────────────────────────────────────────
+# Control the Hyprland snake-grid layout (a 2x2 "snake" across two desktops).
+#
+#   snakegrid               toggle the grid on/off for this session
+#   snakegrid --always-on   start it automatically at every login
+#   snakegrid --always-off  stop auto-starting it at login (and turn it off now)
+#   snakegrid --help        show this help
+#
+DAEMON="$HOME/.config/hypr/scripts/snake-grid.py"
+MARK="$HOME/.config/hypr/.snakegrid-autostart"   # presence = start at login
+
+running() { pgrep -f snake-grid.py >/dev/null 2>&1; }
+
+start() { running || setsid -f python3 "$DAEMON" >/dev/null 2>&1; }
+
+stop() {
+    pkill -f snake-grid.py 2>/dev/null
+    # return the grid desktops' windows to normal tiling
+    hyprctl clients -j 2>/dev/null | python3 -c "
+import json,sys,subprocess
+ws=[int(x) for x in '${SNAKE_WS:-1,2}'.split(',')]
+for c in json.load(sys.stdin):
+    if c['workspace']['id'] in ws and c.get('floating'):
+        subprocess.run(['hyprctl','dispatch','settiled','address:'+c['address']],stdout=subprocess.DEVNULL)
+" 2>/dev/null
+}
+
+say() { notify-send "snakegrid" "$1" -t 2200 2>/dev/null; echo "snakegrid: $1"; }
+
+case "${1:-}" in
+    "")
+        if running; then stop; say "OFF for this session"; else start; say "ON for this session"; fi ;;
+    --always-on)
+        touch "$MARK"; start; say "ALWAYS-ON — it will start at every login" ;;
+    --always-off)
+        rm -f "$MARK"; stop; say "ALWAYS-OFF — it won't start at login" ;;
+    --help|-h)
+        cat <<'EOF'
+snakegrid — Hyprland snake-grid layout (2x2 across two desktops)
+
+  snakegrid               toggle the grid on/off for this session
+  snakegrid --always-on   start it automatically at every login
+  snakegrid --always-off  stop auto-starting it at login (and turn it off now)
+  snakegrid --help        show this help
+EOF
+        ;;
+    *)
+        echo "snakegrid: unknown option '$1'  (try: snakegrid --help)"; exit 1 ;;
+esac
