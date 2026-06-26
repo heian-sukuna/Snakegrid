@@ -42,8 +42,8 @@ the oldest window glides onto the next one.
 ## Install
 
 ```sh
-git clone https://github.com/<you>/snakegrid.git
-cd snakegrid
+git clone https://github.com/heian-sukuna/Snakegrid.git
+cd Snakegrid
 ./install.sh
 ```
 
