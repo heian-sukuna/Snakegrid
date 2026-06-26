@@ -9,7 +9,7 @@
 #
 # You normally control this with the `snakegrid` command, not directly.
 # Stop a stray instance with:  pkill -f snake-grid.py
-import socket, os, json, subprocess
+import socket, os, json, subprocess, threading
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 GRID_WS = [int(x) for x in os.environ.get("SNAKE_WS", "1,2").split(",")]  # grid desktops, in overflow order
@@ -77,6 +77,23 @@ def relayout():
     if batch:
         H("--batch", " ; ".join(batch))
 
+# ── deferred re-layout ──────────────────────────────────────────────────────
+# Some apps (browsers like Zen/Firefox) restore their own remembered window size
+# a moment AFTER they map, which clobbers the grid placement and pushes the
+# window out of its 1/4 tile. So after a window opens we re-apply the layout a
+# few times across the first ~1.6s, snapping the settled window back into place.
+# A lock serialises these with the event loop so they don't trample `order`.
+LOCK            = threading.Lock()
+RESETTLE_DELAYS = (0.3, 0.8, 1.6)
+
+def relayout_locked():
+    with LOCK:
+        relayout()
+
+def resettle():
+    for d in RESETTLE_DELAYS:
+        threading.Timer(d, relayout_locked).start()
+
 def main():
     # grab any windows already on the grid desktops (e.g. after a reload)
     cs = [c for c in (Hj("clients") or []) if c["workspace"]["id"] in GRID_WS]
@@ -85,6 +102,7 @@ def main():
         order.append(c["address"])
     if order:
         relayout()
+        resettle()   # snap any already-open self-resizers (e.g. a browser) back
 
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(SOCK2)
@@ -96,13 +114,16 @@ def main():
                 addr = "0x" + p[0]
                 ws = int(p[1]) if p[1].lstrip("-").isdigit() else None
                 if ws in GRID_WS and addr not in order and len(order) < MAX:
-                    order.insert(0, addr)
-                    relayout()
+                    with LOCK:
+                        order.insert(0, addr)
+                        relayout()
+                    resettle()   # re-snap if the app resizes itself on startup
             elif ev == "closewindow":
                 addr = "0x" + data.strip()
                 if addr in order:
-                    order.remove(addr)
-                    relayout()
+                    with LOCK:
+                        order.remove(addr)
+                        relayout()
         except Exception:
             pass
 
