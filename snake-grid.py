@@ -17,7 +17,7 @@
 # dispatches that actually change something ("drift-skip"), so a window already
 # in place costs zero commands and never re-jiggles, and (b) cache the monitor
 # geometry, refreshing it only when monitors/workspaces actually change.
-import socket, os, json, threading
+import socket, os, json, threading, time
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 GRID_WS = [int(x) for x in os.environ.get("SNAKE_WS", "1,2").split(",")]  # grid desktops, in overflow order
@@ -25,6 +25,13 @@ SNAKE   = ["tl", "tr", "br", "bl"]   # the slide path (this defines the 2x2 snak
 GAP     = 10                          # pixels between tiles / screen edge
 TOL     = 2                           # px slack before we bother moving/resizing a window
 # ──────────────────────────────────────────────────────────────────────────────
+
+# Optional latency tracing: run with SNAKE_DEBUG=1 to log timings to /tmp/snakegrid.log
+DEBUG = bool(os.environ.get("SNAKE_DEBUG"))
+def log(msg):
+    if DEBUG:
+        with open("/tmp/snakegrid.log", "a") as f:
+            f.write(f"{time.time():.4f} {msg}\n")
 
 PERWS = len(SNAKE)              # tiles per desktop (4)
 MAX   = PERWS * len(GRID_WS)    # total managed tiles
@@ -128,7 +135,12 @@ def relayout():
             batch.append(f"dispatch resizewindowpixel exact {cw} {ch},{ad}")
         if not (_near(cx0, sx) and _near(cy0, sy)):
             batch.append(f"dispatch movewindowpixel exact {sx} {sy},{ad}")
-    H_batch(batch)
+    if DEBUG:
+        t = time.perf_counter()
+        H_batch(batch)
+        log(f"relayout {len(order)} win, {len(batch)} dispatches, {(time.perf_counter()-t)*1000:.1f}ms")
+    else:
+        H_batch(batch)
 
 # ── deferred re-layout ──────────────────────────────────────────────────────
 # Some apps (browsers like Zen/Firefox) restore their own remembered window size
@@ -174,9 +186,11 @@ def main():
                 addr = "0x" + p[0]
                 ws = int(p[1]) if p[1].lstrip("-").isdigit() else None
                 if ws in GRID_WS and addr not in order and len(order) < MAX:
+                    log(f"openwindow {addr} ws={ws} -> placing")
                     with LOCK:
                         order.insert(0, addr)
                         relayout()
+                    log(f"openwindow {addr} placed")
                     resettle()   # re-snap if the app resizes itself on startup
             elif ev == "closewindow":
                 addr = "0x" + data.strip()
