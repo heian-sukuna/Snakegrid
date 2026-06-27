@@ -75,6 +75,23 @@ TOL     = 2                      # px slack before a window is considered "out o
 config, e.g. `animation = windowsMove, 1, 2, snappy` (200 ms). snakegrid's placement is
 instant; this just controls how the slide *looks*.
 
+**Tip — instant opens:** a window opens *tiled and fullscreen* for an instant before
+snakegrid floats it into its 1/4 tile, so you briefly see it pop up huge and shrink. Since
+the **newest** window always goes to the **top-left** slot, you can open it there directly
+with a window rule and skip that shrink entirely — drift-skip then leaves it put while the
+older windows slide along the snake. Put the TL slot's geometry for your monitor in
+`hyprland.conf` (here: 1920×1080, a top bar, `GAP=10` → position `10 60`, size `945 500`):
+
+```
+windowrule = float true,    match:workspace 1
+windowrule = size 945 500,  match:workspace 1
+windowrule = move 10 60,    match:workspace 1
+```
+
+(`x = GAP`, `y = reserved_top + GAP`, `w = (mon_w − 3·GAP)/2`, `h = (mon_h − reserved_top − 3·GAP)/2`;
+add the same three lines for your other grid workspace.) On a different monitor the coords
+won't match and snakegrid just corrects with a one-off move, so it fails safe.
+
 ## How it works
 
 The daemon connects to Hyprland's **event socket** (`.socket2.sock`) and reacts to window
