@@ -1,11 +1,33 @@
 #!/usr/bin/env bash
 # Installs snakegrid: the daemon + the `snakegrid` command, plus a gated
 # autostart line for Hyprland. Re-runnable (safe to run again to update).
+#
+#   ./install.sh              install / update
+#   ./install.sh --uninstall  remove everything this script added
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
 DEST="$HOME/.config/hypr/scripts"
 BIN="$HOME/.local/bin"
 AUTO="$HOME/.config/hypr/conf/autostart.conf"
+MARK="$HOME/.config/hypr/.snakegrid-autostart"
+STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/snakegrid.state"
+
+uninstall() {
+    pkill -f 'python3 .*snake-grid\.py' 2>/dev/null || true
+    rm -f "$DEST/snake-grid.py" "$DEST/snakegrid" "$BIN/snakegrid" "$MARK" "$STATE"
+    if [ -f "$AUTO" ]; then
+        sed -i '/# snakegrid autostart/d; /snakegrid-autostart.*snake-grid\.py/d' "$AUTO"
+        echo "• removed autostart line from $AUTO"
+    fi
+    echo "✅ uninstalled."
+    exit 0
+}
+
+case "${1:-}" in
+    --uninstall|-u) uninstall ;;
+    "") ;;
+    *) echo "usage: ./install.sh [--uninstall]"; exit 1 ;;
+esac
 
 mkdir -p "$DEST" "$BIN"
 install -m 755 "$SRC/snake-grid.py" "$DEST/snake-grid.py"
@@ -28,4 +50,5 @@ fi
 echo "✅ installed."
 echo "   Try:  snakegrid          (toggle on/off)"
 echo "         snakegrid --help"
+echo "   Undo: ./install.sh --uninstall"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "   ⚠  add $BIN to your PATH to use 'snakegrid' directly." ;; esac

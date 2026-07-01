@@ -1,48 +1,71 @@
 #!/usr/bin/env bash
 # ─── snakegrid ───────────────────────────────────────────────────────────────
-# Control the Hyprland snake-grid layout (a 2x2 "snake" across two desktops).
+# Control the Hyprland snake-grid layout (a "snake" floating grid across desktops).
 #
 #   snakegrid               toggle the grid on/off for this session
 #   snakegrid --always-on   start it automatically at every login
 #   snakegrid --always-off  stop auto-starting it at login (and turn it off now)
 #   snakegrid --help        show this help
 #
-DAEMON="$HOME/.config/hypr/scripts/snake-grid.py"
 MARK="$HOME/.config/hypr/.snakegrid-autostart"   # presence = start at login
+STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/snakegrid.state"
 
-running() { pgrep -f snake-grid.py >/dev/null 2>&1; }
+# Locate the daemon: honour $SNAKE_DAEMON, else the usual home/system spots,
+# else the copy sitting next to this script (running straight from a checkout).
+find_daemon() {
+    if [ -n "$SNAKE_DAEMON" ]; then printf '%s\n' "$SNAKE_DAEMON"; return; fi
+    local self; self="$(dirname "$(readlink -f "$0")")"
+    local cand
+    for cand in \
+        "$HOME/.config/hypr/scripts/snake-grid.py" \
+        "/usr/lib/snakegrid/snake-grid.py" \
+        "/usr/share/snakegrid/snake-grid.py" \
+        "$self/snake-grid.py"; do
+        [ -f "$cand" ] && { printf '%s\n' "$cand"; return; }
+    done
+}
+DAEMON="$(find_daemon)"
 
-start() { running || setsid -f python3 "$DAEMON" >/dev/null 2>&1; }
+# Match the daemon precisely so we never touch an editor or this very shell that
+# merely has "snake-grid.py" somewhere on its command line.
+running() { pgrep -f 'python3 .*snake-grid\.py' >/dev/null 2>&1; }
+
+start() {
+    if [ -z "$DAEMON" ]; then say "daemon not found — run ./install.sh"; return 1; fi
+    running || setsid -f python3 "$DAEMON" >/dev/null 2>&1
+}
 
 stop() {
-    pkill -f snake-grid.py 2>/dev/null
-    # return the grid desktops' windows to normal tiling
-    hyprctl clients -j 2>/dev/null | python3 -c "
-import json,sys,subprocess
-ws=[int(x) for x in '${SNAKE_WS:-1,2}'.split(',')]
-for c in json.load(sys.stdin):
-    if c['workspace']['id'] in ws and c.get('floating'):
-        subprocess.run(['hyprctl','dispatch','settiled','address:'+c['address']],stdout=subprocess.DEVNULL)
-" 2>/dev/null
+    pkill -f 'python3 .*snake-grid\.py' 2>/dev/null
+    # return only the windows WE managed to normal tiling (recorded in $STATE)
+    if [ -f "$STATE" ]; then
+        while IFS= read -r addr; do
+            [ -n "$addr" ] && hyprctl dispatch settiled "address:$addr" >/dev/null 2>&1
+        done < "$STATE"
+        rm -f "$STATE"
+    fi
 }
 
 say() { notify-send "snakegrid" "$1" -t 2200 2>/dev/null; echo "snakegrid: $1"; }
 
 case "${1:-}" in
     "")
-        if running; then stop; say "OFF for this session"; else start; say "ON for this session"; fi ;;
+        if running; then stop; say "OFF for this session"; else start && say "ON for this session"; fi ;;
     --always-on)
-        touch "$MARK"; start; say "ALWAYS-ON — it will start at every login" ;;
+        touch "$MARK"; start && say "ALWAYS-ON — it will start at every login" ;;
     --always-off)
         rm -f "$MARK"; stop; say "ALWAYS-OFF — it won't start at login" ;;
     --help|-h)
         cat <<'EOF'
-snakegrid — Hyprland snake-grid layout (2x2 across two desktops)
+snakegrid — Hyprland snake-grid layout (a "snake" floating grid across desktops)
 
   snakegrid               toggle the grid on/off for this session
   snakegrid --always-on   start it automatically at every login
   snakegrid --always-off  stop auto-starting it at login (and turn it off now)
   snakegrid --help        show this help
+
+Tune it with environment variables (see the daemon's CONFIG block / README):
+  SNAKE_WS=1,2  SNAKE_GRID=2x2  SNAKE_GAP=10  SNAKE_TOL=2  SNAKE_IGNORE=class1,class2
 EOF
         ;;
     *)
