@@ -28,10 +28,21 @@ import threading
 import time
 
 # ── CONFIG (all overridable via environment) ──────────────────────────────────
-GRID_WS = [int(x) for x in os.environ.get("SNAKE_WS", "1,2").split(",")]  # grid desktops, in overflow order
 GAP     = int(os.environ.get("SNAKE_GAP", "10"))   # pixels between tiles / screen edge
 TOL     = int(os.environ.get("SNAKE_TOL", "2"))    # px slack before we bother moving/resizing a window
 IGNORE  = {c for c in os.environ.get("SNAKE_IGNORE", "").split(",") if c}  # window classes to never manage
+
+
+def parse_ws(spec):
+    """'1,2' -> [1, 2]. Skips blanks/space/junk tokens; falls back to [1, 2] if
+    nothing usable is left (so a stray space like 'SNAKE_WS=1, 2' can't crash the
+    daemon at import — it used to raise ValueError and never start)."""
+    out = []
+    for tok in str(spec).split(","):
+        tok = tok.strip()
+        if tok.lstrip("-").isdigit():
+            out.append(int(tok))
+    return out or [1, 2]
 
 
 def parse_grid(spec):
@@ -56,6 +67,7 @@ def make_snake(rows, cols):
     return path
 
 
+GRID_WS = parse_ws(os.environ.get("SNAKE_WS", "1,2"))   # grid desktops, in overflow order
 ROWS, COLS = parse_grid(os.environ.get("SNAKE_GRID", "2x2"))
 SNAKE_PATH = make_snake(ROWS, COLS)   # the slide path (this defines the snake)
 PERWS = len(SNAKE_PATH)               # tiles per desktop
@@ -101,7 +113,8 @@ def _ipc(req: str) -> bytes:
     """One request→response round trip on Hyprland's command socket."""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.connect(SOCK1)
+            s.settimeout(2.0)   # if the compositor ever stalls mid-reply, fail out
+            s.connect(SOCK1)    # instead of hanging forever while holding LOCK
             s.sendall(req.encode())
             buf = bytearray()
             while True:
@@ -110,7 +123,7 @@ def _ipc(req: str) -> bytes:
                     break
                 buf += chunk
         return bytes(buf)
-    except OSError as e:
+    except OSError as e:   # socket.timeout is an OSError subclass, so it lands here too
         log(f"ipc error: {e!r}")
         return b""
 
@@ -130,18 +143,29 @@ def H_batch(cmds):
         _ipc("[[BATCH]]" + " ; ".join(cmds))
 
 
-# ── monitor geometry (cached) ─────────────────────────────────────────────────
-_mon_cache = None   # (by_name, focused, ws2mon) or None when stale
+# ── monitor geometry (cached with a short TTL) ────────────────────────────────
+# Caching makes a relayout pure arithmetic. Real monitor/workspace events
+# invalidate the cache instantly (invalidate_monitors, below). But some geometry
+# changes fire NO event — most importantly a bar (waybar) registering or resizing
+# its reserved/exclusive area. At login the daemon can start BEFORE the bar
+# reserves its strip, cache reserved=[0,0,0,0], and then place every tile under
+# the bar forever, since nothing tells it to refresh. So the cache also
+# self-expires after MON_TTL seconds — two sub-millisecond socket queries, which
+# is nothing next to being persistently wrong.
+_mon_cache = None      # (by_name, focused, ws2mon) or None when stale
+_mon_cache_at = 0.0    # monotonic time the cache was last filled
+MON_TTL = 2.0          # seconds before a re-query (heals event-less reserved changes)
 
 
 def monitors():
-    global _mon_cache
-    if _mon_cache is None:
+    global _mon_cache, _mon_cache_at
+    if _mon_cache is None or (time.monotonic() - _mon_cache_at) > MON_TTL:
         mons = Hj("monitors") or []
         by_name = {m["name"]: m for m in mons}
         focused = next((m for m in mons if m.get("focused")), (mons[0] if mons else None))
         ws2mon  = {w["id"]: w.get("monitor") for w in (Hj("workspaces") or [])}
         _mon_cache = (by_name, focused, ws2mon)
+        _mon_cache_at = time.monotonic()
     return _mon_cache
 
 
@@ -172,10 +196,25 @@ def _near(a, b):
     return a is not None and b is not None and abs(a - b) <= TOL
 
 
+def _has_tag(c, tag):
+    """True if window `c` carries `tag`. Hyprland reports a rule-applied tag with
+    a trailing '*' (e.g. 'snakegrid*'), so compare on the stripped name."""
+    return any(t.rstrip("*") == tag for t in (c.get("tags") or []))
+
+
 def should_manage(c, cls):
-    """A window we should slot into the grid (vs. a dialog/popup/ignored class)."""
+    """A window we should slot into the grid (vs. a dialog/popup/ignored class).
+
+    The base heuristic is "maps floating -> it's a dialog, leave it alone". The
+    escape hatch is the 'snakegrid' tag: if you deliberately float some app on a
+    grid desktop but still want it in the snake, a `tag +snakegrid` windowrule
+    marks it as ours, so a tagged window is always managed while genuine (untagged)
+    floating dialogs are still left alone. See README > Instant opens.
+    """
     if cls in IGNORE:
         return False
+    if _has_tag(c, "snakegrid"):   # pre-floated by our rule — manage it
+        return True
     if c.get("floating"):   # dialogs & popups map floating; leave them be
         return False
     return True
@@ -193,7 +232,7 @@ def write_state():
     _state_written = key
     try:
         with open(STATE_FILE, "w") as f:
-            f.write("\n".join(order))
+            f.writelines(a + "\n" for a in order)   # trailing newline: teardown reads every line
     except OSError as e:
         log(f"state write failed: {e!r}")
 
@@ -201,6 +240,8 @@ def write_state():
 def relayout(clients=None):
     global order
     if clients is None:
+        if not order:
+            return   # nothing managed and nothing to prune -> skip the clients query
         clients = {c["address"]: c for c in (Hj("clients") or [])}
     order = [a for a in order if a in clients][:MAX]
     by_name, focused, ws2mon = monitors()
@@ -238,16 +279,23 @@ def relayout(clients=None):
     write_state()
 
 
-# ── deferred re-layout ──────────────────────────────────────────────────────
+# ── deferred re-layout (one scheduler thread) ────────────────────────────────
 # Some apps (browsers like Zen/Firefox) restore their own remembered window size
-# a moment AFTER they map, which clobbers the grid placement and pushes the
-# window out of its tile. So after a window opens we re-apply the layout a few
-# times across the first second, snapping the settled window back into place.
-# Thanks to drift-skip these passes are cheap: if nothing moved they send zero
-# commands. A lock serialises them with the event loop so they don't trample
-# `order`.
+# a moment AFTER they map, which clobbers the grid placement. So after a window
+# opens we re-apply the layout a few times across the first second, snapping the
+# settled window back into place. Thanks to drift-skip these passes are cheap: if
+# nothing moved they send zero commands.
+#
+# Rather than spawn a fresh threading.Timer per delay per window (a 5-window
+# session restore = 15 short-lived threads all waking to grab LOCK at once), a
+# single long-lived scheduler thread sleeps until the nearest due time, then fires
+# every deadline that's due as ONE coalesced relayout. LOCK serialises relayouts
+# with the event loop so they never trample `order`.
 LOCK            = threading.Lock()
 RESETTLE_DELAYS = (0.15, 0.45, 1.0)
+
+_sched_cond = threading.Condition()
+_deadlines  = []   # monotonic times at which a relayout is due
 
 
 def relayout_locked():
@@ -255,9 +303,33 @@ def relayout_locked():
         relayout()
 
 
+def schedule(*delays):
+    """Ask the scheduler thread to run a relayout `delay` seconds from now, for
+    each delay. Duplicate/near deadlines coalesce into a single relayout."""
+    now = time.monotonic()
+    with _sched_cond:
+        _deadlines.extend(now + d for d in delays)
+        _sched_cond.notify()
+
+
 def resettle():
-    for d in RESETTLE_DELAYS:
-        threading.Timer(d, relayout_locked).start()
+    schedule(*RESETTLE_DELAYS)
+
+
+def _scheduler():
+    while True:
+        with _sched_cond:
+            while not _deadlines:
+                _sched_cond.wait()
+            wait = min(_deadlines) - time.monotonic()
+            if wait > 0:
+                _sched_cond.wait(timeout=wait)
+                continue
+            now = time.monotonic()
+            due = [t for t in _deadlines if t <= now]     # everything ripe now…
+            _deadlines[:] = [t for t in _deadlines if t > now]
+        if due:
+            relayout_locked()   # …collapses to one relayout (run outside the cond)
 
 
 # events that change monitor geometry or workspace→monitor mapping, so the
@@ -280,22 +352,33 @@ def handle_event(raw):
         if ev == "openwindow":
             p = data.split(",")
             addr = "0x" + p[0]
-            ws = int(p[1]) if len(p) > 1 and p[1].lstrip("-").isdigit() else None
             cls = p[2] if len(p) > 2 else ""
-            if ws in GRID_WS and addr not in order and len(order) < MAX:
-                placed = False
-                with LOCK:
-                    clients = {c["address"]: c for c in (Hj("clients") or [])}
-                    c = clients.get(addr)
-                    if c is not None and should_manage(c, cls):
-                        log(f"openwindow {addr} ws={ws} cls={cls} -> placing")
-                        order.insert(0, addr)
-                        relayout(clients)
-                        placed = True
-                    else:
-                        log(f"openwindow {addr} cls={cls} left alone")
-                if placed:
-                    resettle()   # re-snap if the app resizes itself on startup
+            # p[1] is the workspace NAME, not its id — a renamed workspace ("web")
+            # makes int() fail and the window is silently never managed. So use the
+            # name only as a cheap pre-filter (a numeric name that isn't a grid ws
+            # can't be ours), and take the authoritative id from the clients query.
+            ws_name = p[1] if len(p) > 1 else ""
+            if ws_name.lstrip("-").isdigit() and int(ws_name) not in GRID_WS:
+                return
+            if addr in order or len(order) >= MAX:
+                return
+            t0 = time.perf_counter() if DEBUG else 0.0
+            placed = False
+            with LOCK:
+                clients = {c["address"]: c for c in (Hj("clients") or [])}
+                t1 = time.perf_counter() if DEBUG else 0.0
+                c = clients.get(addr)
+                if c is not None and c["workspace"]["id"] in GRID_WS and should_manage(c, cls):
+                    order.insert(0, addr)
+                    relayout(clients)
+                    placed = True
+                    if DEBUG:
+                        log(f"openwindow {addr} ws={c['workspace']['id']} cls={cls} -> placing "
+                            f"[query {(t1-t0)*1000:.1f}ms, total {(time.perf_counter()-t0)*1000:.1f}ms]")
+                else:
+                    log(f"openwindow {addr} cls={cls} left alone")
+            if placed:
+                resettle()   # re-snap if the app resizes itself on startup
         elif ev == "closewindow":
             addr = "0x" + data.strip()
             if addr in order:
@@ -322,9 +405,11 @@ def handle_event(raw):
             with LOCK:
                 relayout()
         elif ev in GEOM_EVENTS:
+            # Monitor hotplug / configreloaded tend to arrive in bursts. Drop the
+            # cache now, but debounce the relayout through the scheduler so a burst
+            # collapses to a single pass instead of one per event.
             invalidate_monitors()
-            with LOCK:
-                relayout()
+            schedule(0.15)
     except Exception as e:
         log(f"error handling {ev!r}: {e!r}")
 
@@ -338,10 +423,16 @@ def event_loop():
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.connect(SOCK2)
             backoff = 0.5
-            for raw in s.makefile("r"):
+            # errors="replace": event payloads carry window titles, which can hold
+            # arbitrary bytes. Strict UTF-8 would raise UnicodeDecodeError (a
+            # ValueError, NOT an OSError) here and silently kill the reader — the
+            # daemon would just "stop working". Replace undecodable bytes instead.
+            for raw in s.makefile("r", errors="replace"):
                 handle_event(raw)
         except OSError as e:
             log(f"event socket error: {e!r}")
+        except Exception as e:   # never let a parse/decode error escape and stop the loop
+            log(f"event loop error: {e!r}")
         finally:
             if s is not None:
                 try:
@@ -373,15 +464,43 @@ def main():
         raise SystemExit("snakegrid: no Hyprland session found (HYPRLAND_INSTANCE_SIGNATURE unset).")
     acquire_singleton()
     signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+    log(f"daemon start: pid={os.getpid()} grid={ROWS}x{COLS} ws={GRID_WS} his={HIS}")
 
-    # grab any manageable windows already on the grid desktops (e.g. after a reload)
-    cs = [c for c in (Hj("clients") or [])
-          if c["workspace"]["id"] in GRID_WS and should_manage(c, c.get("class", ""))]
-    cs.sort(key=lambda c: c.get("focusHistoryID", 1e9))   # most-recently-focused first
-    for c in cs[:MAX]:
+    # the settle/debounce scheduler runs for the life of the process
+    threading.Thread(target=_scheduler, daemon=True).start()
+
+    # Adopt what's already on the grid desktops at startup, in two passes:
+    clients = {c["address"]: c for c in (Hj("clients") or [])}
+    seen = set()
+
+    # 1) windows we managed before a restart/crash. The state file survives an
+    #    unclean exit (SIGTERM -> os._exit, no teardown), and those windows are
+    #    still FLOATING from last time — which should_manage would reject as
+    #    dialogs — so we trust the state file to take them back, preserving the
+    #    previous snake order (the file is stored newest-first).
+    try:
+        with open(STATE_FILE) as f:
+            for a in (ln.strip() for ln in f):
+                c = clients.get(a)
+                if a and a not in seen and c and c["workspace"]["id"] in GRID_WS:
+                    order.append(a)
+                    seen.add(a)
+    except OSError:
+        pass
+
+    # 2) plus any other manageable (tiling, non-dialog) windows sitting on the
+    #    grid — e.g. a genuine first run, or windows opened while we were down.
+    fresh = [c for c in clients.values()
+             if c["address"] not in seen
+             and c["workspace"]["id"] in GRID_WS
+             and should_manage(c, c.get("class", ""))]
+    fresh.sort(key=lambda c: c.get("focusHistoryID", 1e9))   # most-recently-focused first
+    for c in fresh:
         order.append(c["address"])
+    del order[MAX:]
+
     if order:
-        relayout()
+        relayout(clients)
         resettle()   # snap any already-open self-resizers (e.g. a browser) back
 
     event_loop()

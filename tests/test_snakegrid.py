@@ -37,6 +37,30 @@ def test_parse_grid(spec, expected):
     assert sg.parse_grid(spec) == expected
 
 
+# ── parse_ws ──────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("spec,expected", [
+    ("1,2", [1, 2]),
+    ("4,5", [4, 5]),
+    ("1, 2", [1, 2]),        # stray space must not crash (it used to)
+    (" 3 , 4 ", [3, 4]),
+    ("7", [7]),
+    ("", [1, 2]),            # empty → default
+    ("a,b", [1, 2]),         # junk → default
+    ("1,,2", [1, 2]),        # blank token skipped
+])
+def test_parse_ws(spec, expected):
+    assert sg.parse_ws(spec) == expected
+
+
+# ── _has_tag (Hyprland reports applied tags with a trailing '*') ────────────────
+def test_has_tag_strips_trailing_star():
+    assert sg._has_tag({"tags": ["snakegrid*"]}, "snakegrid") is True
+    assert sg._has_tag({"tags": ["snakegrid"]}, "snakegrid") is True
+    assert sg._has_tag({"tags": ["other*"]}, "snakegrid") is False
+    assert sg._has_tag({"tags": []}, "snakegrid") is False
+    assert sg._has_tag({}, "snakegrid") is False   # no 'tags' key at all
+
+
 # ── make_snake (boustrophedon) ─────────────────────────────────────────────────
 def test_make_snake_2x2_matches_tl_tr_br_bl():
     assert sg.make_snake(2, 2) == [(0, 0), (0, 1), (1, 1), (1, 0)]
@@ -119,6 +143,19 @@ def test_should_manage_skips_floating_dialogs(monkeypatch):
 def test_should_manage_skips_ignored_class(monkeypatch):
     monkeypatch.setattr(sg, "IGNORE", {"pavucontrol"})
     assert sg.should_manage({"floating": False}, "pavucontrol") is False
+
+
+def test_should_manage_adopts_tagged_floating_window(monkeypatch):
+    # a floating window carrying our tag was pre-floated by the 'instant opens'
+    # rule — it must be managed despite being floating (only dialogs are skipped)
+    monkeypatch.setattr(sg, "IGNORE", set())
+    assert sg.should_manage({"floating": True, "tags": ["snakegrid*"]}, "kitty") is True
+
+
+def test_should_manage_ignored_class_beats_tag(monkeypatch):
+    # an explicitly-ignored class stays ignored even if something tagged it
+    monkeypatch.setattr(sg, "IGNORE", {"pavucontrol"})
+    assert sg.should_manage({"floating": True, "tags": ["snakegrid*"]}, "pavucontrol") is False
 
 
 # ── event payload parsing ────────────────────────────────────────────────────────
