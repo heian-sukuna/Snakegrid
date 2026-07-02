@@ -238,7 +238,7 @@ def write_state():
 
 
 def relayout(clients=None):
-    global order
+    global order, _chase
     if clients is None:
         if not order:
             return   # nothing managed and nothing to prune -> skip the clients query
@@ -270,12 +270,23 @@ def relayout(clients=None):
             batch.append(f"dispatch resizewindowpixel exact {cw} {ch},{ad}")
         if not (_near(cx0, sx) and _near(cy0, sy)):
             batch.append(f"dispatch movewindowpixel exact {sx} {sy},{ad}")
+    moved = bool(batch)
     if DEBUG:
         t = time.perf_counter()
         H_batch(batch)
         log(f"relayout {len(order)} win, {len(batch)} dispatches, {(time.perf_counter()-t)*1000:.1f}ms")
     else:
         H_batch(batch)
+    # Chase snap-backs: some apps (Zen/Firefox) restore their own floating
+    # geometry the instant we move them, so a single correction loses the race.
+    # If we just moved something, re-check very soon and re-apply — drift-skip
+    # makes this free the moment the window finally holds still. CHASE_MAX bounds
+    # it so a window that fights forever only jitters briefly before we yield.
+    if moved and _chase < CHASE_MAX:
+        _chase += 1
+        schedule(0.12)
+    elif not moved:
+        _chase = 0
     write_state()
 
 
@@ -292,11 +303,14 @@ def relayout(clients=None):
 # every deadline that's due as ONE coalesced relayout. LOCK serialises relayouts
 # with the event loop so they never trample `order`.
 LOCK            = threading.Lock()
-# A few passes trailing off over the first few seconds. Browsers (Zen/Firefox)
-# can restore their remembered geometry a second or two AFTER mapping — later
-# than a single early pass would catch — so we keep checking briefly. Drift-skip
-# makes a pass that finds nothing out of place send zero commands.
-RESETTLE_DELAYS = (0.15, 0.45, 1.0, 2.0, 3.5)
+# A few passes trailing off over the first several seconds. Browsers (Zen/Firefox)
+# restore their remembered geometry a beat AFTER mapping, and keep re-asserting it
+# through their startup — so an early pass alone loses. The later passes re-check
+# after startup has settled; combined with chase-on-move (see relayout) they win
+# and stick. Drift-skip makes a pass that finds nothing out of place send nothing.
+RESETTLE_DELAYS = (0.15, 0.45, 1.0, 2.5, 5.0, 8.0)
+CHASE_MAX       = 12    # max rapid re-applies to out-wait a window that snaps back
+_chase          = 0     # consecutive relayouts that had to move something
 
 _sched_cond = threading.Condition()
 _deadlines  = []   # monotonic times at which a relayout is due
