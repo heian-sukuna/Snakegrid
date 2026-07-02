@@ -29,10 +29,25 @@ case "${1:-}" in
     *) echo "usage: ./install.sh [--uninstall]"; exit 1 ;;
 esac
 
+# If a daemon is already running, note it now — after copying the new files we
+# restart it, otherwise the old (pre-update) process keeps running and the update
+# silently does nothing until the next login.
+WAS_RUNNING=0
+pgrep -f 'python3 .*snake-grid\.py' >/dev/null 2>&1 && WAS_RUNNING=1
+
 mkdir -p "$DEST" "$BIN"
 install -m 755 "$SRC/snake-grid.py" "$DEST/snake-grid.py"
 install -m 755 "$SRC/snakegrid"      "$DEST/snakegrid"
 ln -sf "$DEST/snakegrid" "$BIN/snakegrid"
+
+# Restart a running daemon so the just-installed version takes effect immediately.
+# We toggle through the CLI (not a bare pkill) so its stop() re-tiles the windows
+# it managed via the state file before the old process dies: OFF, then ON again.
+if [ "$WAS_RUNNING" = 1 ]; then
+    "$BIN/snakegrid" >/dev/null 2>&1 || true   # running -> toggles OFF (clean teardown)
+    "$BIN/snakegrid" >/dev/null 2>&1 || true   # now off  -> toggles ON with the new daemon
+    echo "• restarted the running daemon to apply the update"
+fi
 
 # add the (marker-gated) autostart line once, if a Hyprland autostart.conf exists
 if [ -f "$AUTO" ] && ! grep -q 'snakegrid-autostart' "$AUTO"; then

@@ -10,17 +10,21 @@
 MARK="$HOME/.config/hypr/.snakegrid-autostart"   # presence = start at login
 STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/snakegrid.state"
 
-# Locate the daemon: honour $SNAKE_DAEMON, else the usual home/system spots,
-# else the copy sitting next to this script (running straight from a checkout).
+# Locate the daemon: honour $SNAKE_DAEMON, else the copy sitting next to this
+# script FIRST, then the usual installed spots. Checking "next to me" first means
+# running straight from a git checkout always uses that checkout's daemon — not a
+# stale copy left in ~/.config from an earlier install. When installed,
+# ~/.local/bin/snakegrid is a symlink into ~/.config/hypr/scripts, and readlink -f
+# resolves it, so "$self" IS the install dir — installed users are unaffected.
 find_daemon() {
     if [ -n "$SNAKE_DAEMON" ]; then printf '%s\n' "$SNAKE_DAEMON"; return; fi
     local self; self="$(dirname "$(readlink -f "$0")")"
     local cand
     for cand in \
+        "$self/snake-grid.py" \
         "$HOME/.config/hypr/scripts/snake-grid.py" \
         "/usr/lib/snakegrid/snake-grid.py" \
-        "/usr/share/snakegrid/snake-grid.py" \
-        "$self/snake-grid.py"; do
+        "/usr/share/snakegrid/snake-grid.py"; do
         [ -f "$cand" ] && { printf '%s\n' "$cand"; return; }
     done
 }
@@ -37,9 +41,12 @@ start() {
 
 stop() {
     pkill -f 'python3 .*snake-grid\.py' 2>/dev/null
-    # return only the windows WE managed to normal tiling (recorded in $STATE)
+    # return only the windows WE managed to normal tiling (recorded in $STATE).
+    # The "|| [ -n "$addr" ]" makes the loop process a final line that has no
+    # trailing newline — otherwise the last (newest) managed window is skipped and
+    # left floating after teardown.
     if [ -f "$STATE" ]; then
-        while IFS= read -r addr; do
+        while IFS= read -r addr || [ -n "$addr" ]; do
             [ -n "$addr" ] && hyprctl dispatch settiled "address:$addr" >/dev/null 2>&1
         done < "$STATE"
         rm -f "$STATE"
