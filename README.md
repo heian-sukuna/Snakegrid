@@ -123,22 +123,17 @@ Everything is set through **environment variables** — no need to edit the inst
 config, e.g. `animation = windowsMove, 1, 2, snappy` (200 ms). snakegrid's placement is
 instant; this just controls how the slide *looks*.
 
-**Tip — instant opens:** a window opens *tiled and fullscreen* for an instant before
-snakegrid floats it into its tile, so you briefly see it pop up huge and shrink. Since
-the **newest** window always goes to the **top-left** slot, you can open it there directly
-with a window rule and skip that shrink entirely — drift-skip then leaves it put while the
-older windows slide along the snake. Put the TL slot's geometry for your monitor in
-`hyprland.conf` (here: 1920×1080, a top bar, `GAP=10` → position `10 60`, size `945 500`):
+**Tip — instant opens:** a window opens *tiled* for an instant before snakegrid floats it
+into its tile. snakegrid places it in well under a millisecond, so the only thing you actually
+perceive is Hyprland's *animation* of that first move — keep the `windowsMove` animation snappy
+(as above) and it reads as instant. This is the whole trick; there's nothing else to configure.
 
-```
-windowrule = float true,    match:workspace 1
-windowrule = size 945 500,  match:workspace 1
-windowrule = move 10 60,    match:workspace 1
-```
-
-(`x = GAP`, `y = reserved_top + GAP`, `w = (mon_w − 3·GAP)/2`, `h = (mon_h − reserved_top − 3·GAP)/2`;
-add the same three lines for your other grid workspace.) On a different monitor the coords
-won't match and snakegrid just corrects with a one-off move, so it fails safe.
+> **Coexisting with your own float rules.** snakegrid treats a *floating* window on a grid
+> desktop as a dialog and leaves it alone — that's how it avoids yanking file pickers into the
+> grid. If you deliberately float some app on a grid workspace and *do* want it tiled into the
+> snake, add a `tag +snakegrid` window rule for it; snakegrid always manages tagged windows.
+> (Don't hardcode `size`/`move` rules for grid windows — snakegrid computes those from your
+> live monitor geometry, so fixed values just fight the daemon.)
 
 ## How it works
 
@@ -162,9 +157,12 @@ Run the daemon with `SNAKE_DEBUG=1` to trace timings to `/tmp/snakegrid.log`:
 SNAKE_DEBUG=1 python3 ~/.config/hypr/scripts/snake-grid.py
 ```
 
-You'll see per-relayout duration + dispatch count, `openwindow … → placing` / `left alone`
-markers, adopt/release lines, and any errors that would otherwise be swallowed — handy for
-confirming where any latency really lives. It's off (and free) by default.
+You'll see a `daemon start` line (pid + config), per-relayout duration + dispatch count,
+`openwindow … → placing` markers with the **per-open timing** (`[query …ms, total …ms]` — the
+time from the open event to the window being placed) or `left alone`, adopt/release lines, and
+any errors that would otherwise be swallowed — handy for confirming where any latency really
+lives. Placement is typically a few milliseconds; settled windows show `0 dispatches`. It's
+off (and free) by default.
 
 ## Development
 
