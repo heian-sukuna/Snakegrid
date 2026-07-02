@@ -144,10 +144,11 @@ target grid from your live monitor geometry, then repositions the managed window
 snapping it to its slot with `movewindowpixel` / `resizewindowpixel`. Because those moves go
 through Hyprland's normal animation pipeline, the tiles **slide** into place.
 
-Some apps (browsers like Zen/Firefox) restore their own remembered window size a moment
-*after* they map. To handle that, snakegrid re-applies the layout a few times over the first
-second after a window opens — and thanks to drift-skip, those passes send nothing once the
-window has settled.
+Some apps (browsers like Zen/Firefox) restore their own remembered size and position a moment
+*after* they map — which fires no move event Hyprland would tell us about. To handle that,
+snakegrid re-applies the layout a few times over the first few seconds after a window opens,
+and also re-snaps a managed window whenever it gains focus. Thanks to drift-skip, all of those
+passes send nothing once the window is already in place, so there's no wasted work or jitter.
 
 ## Debugging
 

@@ -292,7 +292,11 @@ def relayout(clients=None):
 # every deadline that's due as ONE coalesced relayout. LOCK serialises relayouts
 # with the event loop so they never trample `order`.
 LOCK            = threading.Lock()
-RESETTLE_DELAYS = (0.15, 0.45, 1.0)
+# A few passes trailing off over the first few seconds. Browsers (Zen/Firefox)
+# can restore their remembered geometry a second or two AFTER mapping — later
+# than a single early pass would catch — so we keep checking briefly. Drift-skip
+# makes a pass that finds nothing out of place send zero commands.
+RESETTLE_DELAYS = (0.15, 0.45, 1.0, 2.0, 3.5)
 
 _sched_cond = threading.Condition()
 _deadlines  = []   # monotonic times at which a relayout is due
@@ -401,6 +405,14 @@ def handle_event(raw):
                         log(f"adopt {addr} (moved to ws {ws})")
                         order.append(addr)
                         relayout(clients)
+        elif ev == "activewindowv2":
+            # Focusing a managed window is our chance to fix any drift Hyprland
+            # never told us about (an app repositioning its own floating window
+            # fires no move event). If it's still in place, drift-skip sends
+            # nothing; we ignore focus on windows we don't manage.
+            addr = "0x" + data.strip()
+            if addr in order:
+                schedule(0)
         elif ev == "fullscreen":
             with LOCK:
                 relayout()
